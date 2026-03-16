@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Textual Inversion Training using EGGROLL Evolution Strategies"""
+"""Textual Inversion Training using EGGROLL Evolution Strategies with Quantization"""
 
 import os
 
 # Set GPU to use
-gpu_id = "5,6,7"
+gpu_id = "2"
 os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
 
 import torch
@@ -24,16 +24,17 @@ from tqdm import tqdm
 import safetensors
 import wandb
 import matplotlib.pyplot as plt
+from optimum.quanto import quantize, freeze, qint8
 
 # Configuration
 config = {
     'pretrained_model': 'sd-local-sf',
     'data_dir': 'dataset/dog6',
-    'output_dir': 'results_opt/1024_pertb_b32_fullrez',
+    'output_dir': 'results_opt/1024_pertb_b16_high_rank_quant',
     'placeholder_token': 'sks',
     'initializer_token': 'dog',
     'resolution': 512,
-    'train_batch_size': 32,
+    'train_batch_size': 16,
     'num_train_epochs': 50,
     'max_train_steps': 5000,
     'learning_rate': 1e-2,
@@ -42,10 +43,10 @@ config = {
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'dtype': torch.float16,
     'wandb_project': 'Textual Inversion EGGROLL',
-    'wandb_name': 'dog6-eggti-1024_pertb_b32_fullrez',
-    'wandb_notes': 'Improved Textual Inversion training with better personalization',
+    'wandb_name': 'dog6-eggti-1024_pertb_b32_fullrez_quant',
+    'wandb_notes': 'Improved Textual Inversion training with quantization and better personalization',
     'num_envs': 1024,
-    'rank': 4,
+    'rank': 512,
     'initial_sigma': 0.15,
     'min_sigma': 0.01,
     'perturb_batch_size': 1024,
@@ -274,6 +275,31 @@ unet.eval()
 # Get the embedding dimension
 embedding_dim = text_encoder.get_input_embeddings().weight.shape[1]
 
+# =============================================================================
+# Quantize and freeze modules
+# =============================================================================
+print("Quantizing models with qint8...")
+quantize(text_encoder, weights=qint8)
+quantize(unet, weights=qint8)
+quantize(vae, weights=qint8)
+
+print("Freezing quantized models...")
+freeze(text_encoder)
+freeze(unet)
+freeze(vae)
+
+print("Converting text_encoder to half precision...")
+text_encoder.half()
+
+# Compile models
+print("Compiling models with torch.compile...")
+unet = torch.compile(unet, dynamic=False, backend='eager')
+vae = torch.compile(vae, dynamic=False, backend='eager')
+text_encoder = torch.compile(text_encoder, dynamic=False, backend='eager')
+
+torch.cuda.empty_cache()
+print("✓ Models quantized, frozen, and compiled successfully")
+
 # Keep original embeddings as reference
 orig_embeds_params = text_encoder.get_input_embeddings().weight.data.clone()
 base_embeds = orig_embeds_params[placeholder_token_id].clone()
@@ -329,11 +355,13 @@ try:
         'improved': True,
         'resolution': config['resolution'],
         'CUDA_VISIBLE_DEVICES': gpu_id,
+        'quantization': 'qint8',
+        'compiled': True,
     })
 except:
     pass
 
-progress_bar = tqdm(total=num_epochs * len(train_dataloader), desc="Training with Improved EGGROLL")
+progress_bar = tqdm(total=num_epochs * len(train_dataloader), desc="Training with Improved EGGROLL (Quantized)")
 
 sigma = initial_sigma
 
