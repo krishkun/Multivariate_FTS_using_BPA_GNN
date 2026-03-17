@@ -4,7 +4,7 @@
 import os
 
 # Set GPU to use
-gpu_id = "2"
+gpu_id = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
 
 import torch
@@ -30,11 +30,11 @@ from optimum.quanto import quantize, freeze, qint8
 config = {
     'pretrained_model': 'sd-local-sf',
     'data_dir': 'dataset/dog6',
-    'output_dir': 'results_opt/1024_pertb_b16_high_rank_quant',
+    'output_dir': 'results_opt/128_pertb_b64_quat_rez_quant_g32',
     'placeholder_token': 'sks',
     'initializer_token': 'dog',
-    'resolution': 512,
-    'train_batch_size': 16,
+    'resolution': 128,
+    'train_batch_size': 64,
     'num_train_epochs': 50,
     'max_train_steps': 5000,
     'learning_rate': 1e-2,
@@ -43,13 +43,14 @@ config = {
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'dtype': torch.float16,
     'wandb_project': 'Textual Inversion EGGROLL',
-    'wandb_name': 'dog6-eggti-1024_pertb_b32_fullrez_quant',
+    'wandb_name': 'dog6-eggti-128_pertb_b64_quat_rez_quant_g32',
     'wandb_notes': 'Improved Textual Inversion training with quantization and better personalization',
-    'num_envs': 1024,
-    'rank': 512,
+    'num_envs': 128,
+    'rank': 32,
     'initial_sigma': 0.15,
     'min_sigma': 0.01,
-    'perturb_batch_size': 1024,
+    'perturb_batch_size': 128,
+    'no_groups': 32,  # Number of groups for fitness normalization (0 = global normalization, >0 = group-based)
 }
 
 print(f"Using device: {config['device']}")
@@ -329,6 +330,46 @@ def generate_lora_perturbations(num_perturbs, embedding_dim, rank, sigma, seed=N
     # Transpose to get (num_perturbs, embedding_dim)
     return all_perturbs.T
 
+def normalize_fitnesses(raw_fitnesses, no_groups, eps=1e-8):
+    """
+    Normalize fitnesses either globally or within groups.
+    
+    Args:
+        raw_fitnesses: Tensor of shape (num_envs,) containing raw fitness values
+        no_groups: Number of groups for normalization (0 = global, >0 = group-based)
+        eps: Small epsilon for numerical stability
+    
+    Returns:
+        normalized_fitnesses: Tensor of same shape as raw_fitnesses
+    """
+    if no_groups <= 0:
+        # Global normalization across all perturbations
+        normalized_fitnesses = (raw_fitnesses - raw_fitnesses.mean()) / (raw_fitnesses.std() + eps)
+    else:
+        # Group-based normalization
+        num_perturbations = raw_fitnesses.shape[0]
+        
+        # Ensure number of perturbations is divisible by group size
+        if num_perturbations % no_groups != 0:
+            raise ValueError(f"num_envs ({num_perturbations}) must be divisible by no_groups ({no_groups})")
+        
+        group_size = num_perturbations // no_groups
+        # Reshape to (no_groups, group_size)
+        group_fitnesses = raw_fitnesses.view(no_groups, group_size)
+        
+        # Normalize within each group
+        group_means = group_fitnesses.mean(dim=1, keepdim=True)
+        group_stds = group_fitnesses.std(dim=1, keepdim=True)
+        
+        # Use global std for stability (similar to HyperscaleES approach)
+        global_std = raw_fitnesses.std() + eps
+        normalized_group_fitnesses = (group_fitnesses - group_means) / global_std
+        
+        # Flatten back to (num_perturbations,)
+        normalized_fitnesses = normalized_group_fitnesses.view(-1)
+    
+    return normalized_fitnesses
+
 # Loss history
 losses = []
 weight_dtype = config['dtype']
@@ -339,6 +380,12 @@ print(f"Rank of perturbations: {rank}")
 print(f"Initial perturbation strength (sigma): {initial_sigma}")
 print(f"Minimum sigma: {min_sigma}")
 print(f"Number of epochs: {num_epochs}")
+
+# Print grouping configuration
+if config['no_groups'] > 0:
+    print(f"Group-based normalization: {config['no_groups']} groups ({num_envs // config['no_groups']} perturbations per group)")
+else:
+    print(f"Global normalization: all perturbations normalized together")
 
 # Log EGGROLL hyperparameters to wandb
 try:
@@ -357,6 +404,7 @@ try:
         'CUDA_VISIBLE_DEVICES': gpu_id,
         'quantization': 'qint8',
         'compiled': True,
+        'no_groups': config['no_groups'],
     })
 except:
     pass
@@ -440,8 +488,8 @@ for epoch in range(num_epochs):
                     perturb_loss = F.mse_loss(model_pred.float(), target.float())
                     raw_fitnesses[pert_start + i] = -perturb_loss.to(weight_dtype)
         
-        # Normalize fitnesses
-        normalized_fitnesses = (raw_fitnesses - raw_fitnesses.mean()) / (raw_fitnesses.std() + 1e-8)
+        # Normalize fitnesses (global or group-based based on config)
+        normalized_fitnesses = normalize_fitnesses(raw_fitnesses, config['no_groups'])
 
         # EGGROLL-style update
         update = (normalized_fitnesses.unsqueeze(-1) * perturbations).sum(0) / num_envs
