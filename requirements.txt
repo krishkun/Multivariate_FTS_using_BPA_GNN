@@ -1,0 +1,22 @@
+# Core dependencies
+torch>=1.13.1
+torch-geometric>=2.3.0
+numpy>=1.23.5
+pandas>=1.5.3
+scikit-learn>=1.2.2
+scipy>=1.10.1
+
+# Visualization and explainability
+matplotlib>=3.7.0
+seaborn>=0.12.0
+shap>=0.42.0
+
+# Deep learning utilities
+einops>=0.4.0
+tqdm>=4.66.0
+
+# Optional: for GPU support
+# torch-scatter
+# torch-sparse
+# torch-cluster
+# torch-spline-conv
